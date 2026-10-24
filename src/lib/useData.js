@@ -8,6 +8,8 @@ export const EMPTY = {
 }
 
 // Loads everything for the signed-in owner. Missing months are generated first (safe to repeat).
+// Deleted loans are left out (active = false). Deleted rent entries are filtered out below; they are listed
+// separately on the Loans and Rent pages, where they can be restored.
 export function useLoanMateData(session) {
   const [data, setData] = useState(EMPTY)
   const [loading, setLoading] = useState(false)
@@ -47,7 +49,7 @@ export function useLoanMateData(session) {
       loans: loans.data ?? [],
       entries: entries.data ?? [],
       properties: properties.data ?? [],
-      tenancies: tenancies.data ?? [],
+      tenancies: (tenancies.data ?? []).filter((row) => !row.deleted_at), // deleted rent entries stay out of every list
       dues: dues.data ?? [],
       payments: payments.data ?? [],
       reminders: reminders.data ?? [],

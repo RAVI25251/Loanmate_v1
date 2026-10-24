@@ -1,11 +1,21 @@
-// Works out which SMS reminders are ready to send today.
-// Rules: the global SMS switch must be ON, the person's own switch must be ON (default OFF = no consent yet),
-// and the reminder type (upcoming / due / overdue) must be ON for that person.
-import { addDays, dueDateFor, normalizeMobile, periodLabel } from './format.js'
+// Works out which reminders are ready to send today, by SMS and by email.
+//
+// A reminder is offered only when ALL of these are ON:
+//   * the master switch of that channel (SMS or email)
+//   * the person's own switch for that channel (both start OFF: no consent yet)
+//   * the reminder type for that person (upcoming / due / overdue)
+//   * the switch of that loan or rent (reminders_enabled, ON unless you switched it OFF)
+//
+// Interest-only loans: interest is owed once a month has completed. If interest is pending, the reminder is for
+// that amount (due on the day it was added, overdue after). If nothing is pending, the reminder is an early
+// notice for the interest that will be added when the running month completes.
+import { addDays, dueDateFor, isEmail, normalizeMobile, periodLabel } from './format.js'
 import { buildLoanMessage, buildRentMessage, renderCustomMessage } from './messages.js'
+import { buildEmailSubject } from './remindMail.js'
 import { latestEntry, nextInterest } from './selectors.js'
 
 export const REMINDER_TYPES = ['upcoming', 'due', 'overdue']
+export const CHANNELS = ['sms', 'email']
 
 export function getSetting(reminders, personId, type) {
   const row = reminders.find((r) => r.person_id === personId && r.reminder_type === type)
@@ -26,8 +36,21 @@ export function stageFor(today, dueDate, daysBefore) {
   return null
 }
 
-export function buildReminderQueue({ today, people, reminders, loans, entries, payments = [], tenancies, properties, dues, smsHistory, globalEnabled = true }) {
-  if (!globalEnabled) return []
+// Which channels are switched ON for a person (master switch AND the person's own switch)
+export function channelsFor(person, { smsGlobal = true, emailGlobal = true } = {}) {
+  const out = []
+  if (smsGlobal && person.sms_enabled) out.push('sms')
+  if (emailGlobal && person.email_enabled === true) out.push('email')
+  return out
+}
+
+export function buildReminderQueue({
+  today, people, reminders, loans, entries, payments = [], tenancies, properties, dues, smsHistory,
+  globalEnabled = true, // the SMS master switch (kept under its old name)
+  emailGlobalEnabled = true,
+}) {
+  if (!globalEnabled && !emailGlobalEnabled) return []
+  const globals = { smsGlobal: globalEnabled, emailGlobal: emailGlobalEnabled }
   const period = today.slice(0, 7)
   const personById = new Map(people.map((p) => [p.id, p]))
   const propertyById = new Map(properties.map((p) => [p.id, p]))
@@ -36,6 +59,8 @@ export function buildReminderQueue({ today, people, reminders, loans, entries, p
   const months = { en: periodLabel(period, 'en'), te: periodLabel(period, 'te') }
 
   function push(person, base) {
+    const channels = channelsFor(person, globals)
+    if (!channels.length) return
     const upcomingSetting = getSetting(reminders, person.id, 'upcoming')
     const stage = stageFor(today, base.dueDate, upcomingSetting.daysBefore)
     if (!stage) return
@@ -49,22 +74,33 @@ export function buildReminderQueue({ today, people, reminders, loans, entries, p
     else if (base.category === 'house_rent' || base.category === 'shop_rent')
       message = buildRentMessage({ lang, shop: base.category === 'shop_rent', name: person.name, month: vars.month, amount: base.amount, dueDate: base.dueDate, arrears: base.arrears, total: base.total, overdue })
     else message = buildLoanMessage({ lang, name: person.name, amount: base.amount, dueDate: base.dueDate, principal: base.principal, interest: base.interest, overdue })
-    // one reminder per person, payment, due date and stage
-    const key = `${person.id}|${base.category}|${base.sourceId}|${base.dueDate}|${stage}`
-    const history = historyByKey.get(key)
+
+    // one reminder per person, payment, due date, stage and channel (the SMS key is unchanged from earlier versions)
+    const smsKey = `${person.id}|${base.category}|${base.sourceId}|${base.dueDate}|${stage}`
     const mobile = normalizeMobile(person.mobile)
-    out.push({
-      key, personId: person.id, personName: person.name, mobile, mobileOk: Boolean(mobile),
-      category: base.category, stage, lang, dueDate: base.dueDate, amount: base.amount, message,
-      status: history ? history.status : 'ready', historyId: history?.id ?? null,
-    })
+    const email = person.email ? String(person.email).trim().toLowerCase() : ''
+
+    for (const channel of channels) {
+      const key = channel === 'sms' ? smsKey : `${smsKey}|email`
+      const history = historyByKey.get(key)
+      const emailOk = Boolean(email) && isEmail(email)
+      out.push({
+        key, channel, personId: person.id, personName: person.name,
+        mobile, mobileOk: Boolean(mobile), email, emailOk,
+        contactOk: channel === 'sms' ? Boolean(mobile) : emailOk,
+        category: base.category, stage, lang, dueDate: base.dueDate, amount: base.amount, message,
+        subject: channel === 'email' ? buildEmailSubject({ lang, category: base.category, amount: base.amount, dueDate: base.dueDate, overdue }) : null,
+        status: history ? history.status : 'ready', historyId: history?.id ?? null,
+      })
+    }
   }
 
   // Money lent
   for (const loan of loans) {
     if (!loan.active || loan.kind !== 'lent') continue
+    if (loan.reminders_enabled === false) continue
     const person = personById.get(loan.person_id)
-    if (!person || !person.sms_enabled) continue
+    if (!person || !channelsFor(person, globals).length) continue
     const latest = latestEntry(entries, loan.id)
     if (!latest) continue
     const emi = Number(loan.emi_paise) || 0
@@ -89,9 +125,10 @@ export function buildReminderQueue({ today, people, reminders, loans, entries, p
   // Rent: house and shop reminders are separate
   for (const tenancy of tenancies) {
     if (!tenancy.active) continue
+    if (tenancy.reminders_enabled === false) continue
     const person = personById.get(tenancy.person_id)
     const property = propertyById.get(tenancy.property_id)
-    if (!person || !property || !person.sms_enabled) continue
+    if (!person || !property || !channelsFor(person, globals).length) continue
     const due = dues.find((d) => d.tenancy_id === tenancy.id && d.period_key === period)
     if (!due || due.closing_arrears_paise <= 0) continue
     push(person, {
@@ -105,5 +142,5 @@ export function buildReminderQueue({ today, people, reminders, loans, entries, p
     })
   }
 
-  return out.sort((a, b) => a.dueDate.localeCompare(b.dueDate) || a.personName.localeCompare(b.personName))
+  return out.sort((a, b) => a.dueDate.localeCompare(b.dueDate) || a.personName.localeCompare(b.personName) || a.channel.localeCompare(b.channel))
 }

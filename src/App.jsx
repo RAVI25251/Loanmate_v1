@@ -2,12 +2,14 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { supabase, supabaseReady } from './lib/supabase.js'
 import { makeT } from './lib/i18n.js'
 import { useLoanMateData } from './lib/useData.js'
+import { useTableLabels } from './lib/tableLabels.js'
 import { APP_NAME } from './lib/config.js'
 import { Notice } from './components/ui.jsx'
+import BottomNav from './components/BottomNav.jsx'
 import Login from './pages/Login.jsx'
 import Dashboard from './pages/Dashboard.jsx'
-import Loans from './pages/Loans.jsx'
-import Rent from './pages/Rent.jsx'
+import Loans from './pages/LoansPlus.jsx'
+import Rent from './pages/RentPlus.jsx'
 import Payments from './pages/Payments.jsx'
 import Reminders from './pages/Reminders.jsx'
 import Reports from './pages/Reports.jsx'
@@ -25,6 +27,7 @@ function App() {
   const t = useMemo(() => makeT(lang), [lang])
 
   const { data, reload, loading, problems } = useLoanMateData(session)
+  useTableLabels() // labels every table cell, so a phone can show each row as a card
 
   const setLang = useCallback((value) => {
     setLangState(value)
@@ -68,6 +71,10 @@ function App() {
   }, [toast])
 
   const go = useCallback((tab, extra = {}) => setNav({ tab, ...extra }), [])
+
+  useEffect(() => {
+    window.scrollTo(0, 0) // a new page starts at the top
+  }, [nav.tab])
 
   async function changeLanguage(value) {
     setLang(value)
@@ -119,7 +126,7 @@ function App() {
         </div>
         <nav className="tabs" aria-label="Main">
           {TABS.map((tab) => (
-            <button key={tab} type="button" className={nav.tab === tab ? 'tab active' : 'tab'} onClick={() => go(tab)}>
+            <button key={tab} type="button" className={nav.tab === tab ? 'tab active' : 'tab'} aria-current={nav.tab === tab ? 'page' : undefined} onClick={() => go(tab)}>
               {t(tab)}
             </button>
           ))}
@@ -155,6 +162,8 @@ function App() {
         {nav.tab === 'reports' && <Reports {...ctx} />}
         {nav.tab === 'settings' && <Settings {...ctx} setLang={changeLanguage} />}
       </main>
+
+      <BottomNav tab={nav.tab} go={go} t={t} lang={lang} />
     </div>
   )
 }
